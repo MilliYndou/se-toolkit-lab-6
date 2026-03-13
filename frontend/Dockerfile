@@ -4,7 +4,7 @@
 
 # A less portable solution: download image through a cache proxy provided by the University.
 # This solution is necessary to avoid "Too many requests" errors.
-# This solution won't work outside the University network.
+# This solution may not work outside of the University network.
 FROM harbor.pg.innopolis.university/docker-hub-cache/node:25-alpine AS builder
 
 WORKDIR /app
@@ -23,7 +23,7 @@ RUN pnpm run build
 
 # A less portable solution: download image through a cache proxy provided by the University.
 # This solution is necessary to avoid "Too many requests" errors.
-# This solution won't work outside the University network.
+# This solution may not work outside of the University network.
 FROM harbor.pg.innopolis.university/docker-hub-cache/caddy:2.11-alpine
 
 COPY --from=builder /app/dist /srv

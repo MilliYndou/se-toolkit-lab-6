@@ -825,8 +825,10 @@ Follow the installation instructions for your platform:
 Complete these steps:
 
 1. [Enable `WSL`](https://code.visualstudio.com/docs/remote/wsl-tutorial#_enable-wsl).
-2. Open a terminal (not the `VS Code Terminal`).
-3. To install `Ubuntu` in `WSL`,
+
+2. Open a terminal (not the [`VS Code Terminal`](./vs-code.md#vs-code-terminal)).
+
+3. To install [`Ubuntu`](./linux-distros.md#ubuntu) in `WSL`,
 
    [run in the `VS Code Terminal`](#run-a-command-in-the-vs-code-terminal):
 
@@ -834,12 +836,21 @@ Complete these steps:
    wsl --install -d Ubuntu-24.04
    ```
 
-   **Note:** [`Ubuntu`](./linux-distros.md#ubuntu) is a [`Linux` distro](./linux-distros.md#what-is-a-linux-distro).
+4. To set it as the default distro,
 
-4. Open [`VS Code`](#what-is-vs-code).
-5. [Install the extension](./vs-code.md#install-the-vs-code-extension) with the identifier `ms-vscode-remote.remote-wsl`.
+   [run in the `VS Code Terminal`](#run-a-command-in-the-vs-code-terminal):
+
+   ```terminal
+   wsl --set-default Ubuntu-24.04
+   ```
+
+5. Open the [`VS Code`](#what-is-vs-code).
+
+6. [Install the extension](./vs-code.md#install-the-vs-code-extension) with the identifier `ms-vscode-remote.remote-wsl`.
 
    This extension lets you use `VS Code` in [`WSL`](./operating-system.md#wsl).
+
+7. Try to [open a directory in `WSL`](#windows-only-open-the-directory-in-wsl).
 
 ### (`macOS` only) Add `VS Code` to `PATH`
 

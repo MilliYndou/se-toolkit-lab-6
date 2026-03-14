@@ -1,30 +1,29 @@
-
 #!/usr/bin/env python3
 """
-Agent CLI that calls an LLM and returns structured JSON.
+Documentation Agent CLI that can read files and list directories.
 """
 
 import json
 import os
 import sys
+import signal
 from datetime import datetime
-from typing import Dict, Any
-
+from typing import Dict, Any, List, Optional
 import requests
 from dotenv import load_dotenv
 
 
-class Agent:
-    """Simple agent that calls an LLM API."""
+class DocumentationAgent:
+    """Agent that can read files and list directories to answer questions."""
     
     def __init__(self):
         """Initialize agent with configuration from environment."""
-        # Load environment variables from .env.agent.secret
         load_dotenv('.env.agent.secret')
         
         self.api_key = os.getenv('LLM_API_KEY')
         self.api_base = os.getenv('LLM_API_BASE')
         self.model = os.getenv('LLM_MODEL')
+        self.project_root = os.getcwd()
         
         if not all([self.api_key, self.api_base, self.model]):
             raise ValueError(
@@ -33,21 +32,146 @@ class Agent:
                 "in .env.agent.secret"
             )
         
-        # Debug info to stderr
-        print(f"Initializing agent with model: {self.model}", file=sys.stderr)
+        print(f"Initializing Documentation Agent with model: {self.model}", file=sys.stderr)
+        print(f"Project root: {self.project_root}", file=sys.stderr)
         print(f"API base: {self.api_base}", file=sys.stderr)
     
-    def call_llm(self, question: str) -> Dict[str, Any]:
-        """
-        Call the LLM API with the given question.
+    def _safe_path(self, path: str) -> Optional[str]:
+        """Validate and sanitize file paths to prevent directory traversal."""
+        path = path.strip('/')
         
-        Args:
-            question: The user's question
+        if '..' in path.split(os.sep):
+            print(f"Security: Rejected path with '..' - {path}", file=sys.stderr)
+            return None
+        
+        abs_path = os.path.abspath(os.path.join(self.project_root, path))
+        
+        if not abs_path.startswith(self.project_root):
+            print(f"Security: Path outside project root - {abs_path}", file=sys.stderr)
+            return None
+        
+        return abs_path
+    
+    def read_file(self, path: str) -> str:
+        """Read a file from the project repository."""
+        print(f"Tool: read_file({path})", file=sys.stderr)
+        
+        safe_path = self._safe_path(path)
+        if not safe_path:
+            return f"Error: Invalid path - {path}"
+        
+        try:
+            if not os.path.isfile(safe_path):
+                return f"Error: File not found - {path}"
             
-        Returns:
-            Dictionary with answer and tool_calls
-        """
-        # Prepare the API request
+            with open(safe_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+                if len(content) > 10000:
+                    content = content[:10000] + "\n...[truncated]"
+                return content
+        except Exception as e:
+            return f"Error reading file: {str(e)}"
+    
+    def list_files(self, path: str = ".") -> str:
+        """List files and directories at a given path."""
+        print(f"Tool: list_files({path})", file=sys.stderr)
+        
+        safe_path = self._safe_path(path)
+        if not safe_path:
+            return f"Error: Invalid path - {path}"
+        
+        try:
+            if not os.path.isdir(safe_path):
+                return f"Error: Not a directory - {path}"
+            
+            entries = os.listdir(safe_path)
+            entries = [e for e in entries if not e.startswith('.')]
+            entries.sort()
+            
+            result = []
+            for entry in entries:
+                full_path = os.path.join(safe_path, entry)
+                if os.path.isdir(full_path):
+                    result.append(f"{entry}/")
+                else:
+                    result.append(entry)
+            
+            return "\n".join(result) if result else "(empty directory)"
+        except Exception as e:
+            return f"Error listing directory: {str(e)}"
+    
+    def get_tool_definitions(self) -> List[Dict[str, Any]]:
+        """Get function-calling schemas for tools."""
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "description": "Read the contents of a file from the project repository. Use this to find answers in documentation files.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Relative path to the file from project root (e.g., 'wiki/git-workflow.md')"
+                            }
+                        },
+                        "required": ["path"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_files",
+                    "description": "List files and directories at a given path. Use this to discover what documentation is available.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Relative directory path from project root (default: '.')",
+                                "default": "."
+                            }
+                        },
+                        "required": []
+                    }
+                }
+            }
+        ]
+    
+    def execute_tool(self, tool_call: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a tool call and return the result."""
+        tool_name = tool_call['function']['name']
+        arguments = json.loads(tool_call['function']['arguments'])
+        
+        if tool_name == 'read_file':
+            result = self.read_file(arguments['path'])
+        elif tool_name == 'list_files':
+            path = arguments.get('path', '.')
+            result = self.list_files(path)
+        else:
+            result = f"Error: Unknown tool '{tool_name}'"
+        
+        return {
+            "role": "tool",
+            "tool_call_id": tool_call['id'],
+            "content": result
+        }
+    
+    def extract_source(self, messages: List[Dict[str, Any]]) -> str:
+        """Extract source reference from the conversation."""
+        for msg in messages:
+            if msg.get('role') == 'assistant' and 'content' in msg:
+                content = msg['content']
+                import re
+                match = re.search(r'(wiki/[a-zA-Z0-9_-]+\.md(?:#[a-zA-Z0-9_-]+)?)', content)
+                if match:
+                    return match.group(1)
+        return "wiki/README.md"
+    
+    def call_llm(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Call the LLM API with messages and optional tools."""
         url = f"{self.api_base}/chat/completions"
         
         headers = {
@@ -55,314 +179,157 @@ class Agent:
             "Content-Type": "application/json"
         }
         
-        # Minimal system prompt
         data = {
             "model": self.model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You are a helpful assistant that answers questions accurately and concisely."
-                },
-                {
-                    "role": "user",
-                    "content": question
-                }
-            ],
+            "messages": messages,
             "temperature": 0.7,
-            "max_tokens": 1000
+            "max_tokens": 2000
         }
         
-        print(f"Sending request to LLM...", file=sys.stderr)
+        if tools:
+            data["tools"] = tools
+            data["tool_choice"] = "auto"
         
         try:
-            # Make the API call with timeout
-            response = requests.post(
-                url,
-                headers=headers,
-                json=data,
-                timeout=30
-            )
-            
-            # Check for HTTP errors
+            response = requests.post(url, headers=headers, json=data, timeout=120)
             response.raise_for_status()
-            
-            # Parse the response
-            result = response.json()
-            
-            # Extract the answer
-            answer = result['choices'][0]['message']['content']
-            
-            print(f"Received response from LLM", file=sys.stderr)
-            
-            # Return structured output
-            return {
-                "answer": answer.strip(),
-                "tool_calls": []
-            }
-            
-        except requests.exceptions.Timeout:
-            print("Error: API request timed out", file=sys.stderr)
-            raise
-        except requests.exceptions.RequestException as e:
-            print(f"Error calling LLM API: {e}", file=sys.stderr)
-            raise
-        except KeyError as e:
-            print(f"Error parsing API response: {e}", file=sys.stderr)
-            print(f"Response: {response.text}", file=sys.stderr)
-            raise
-        except json.JSONDecodeError as e:
-            print(f"Error decoding JSON response: {e}", file=sys.stderr)
-            print(f"Response: {response.text}", file=sys.stderr)
+            return response.json()
+        except Exception as e:
+            print(f"Error calling LLM: {e}", file=sys.stderr)
             raise
     
     def run(self, question: str) -> None:
-        """
-        Run the agent with the given question.
-        
-        Args:
-            question: The user's question
-        """
+        """Run the agent with the given question."""
         start_time = datetime.now()
+        tool_calls_history = []
+        
+        system_prompt = """You are a documentation assistant for a software project. 
+Your task is to answer questions by reading the project's wiki files.
+
+You have access to two tools:
+1. list_files(path) - Discover what files exist in a directory
+2. read_file(path) - Read the contents of a file
+
+Follow these steps:
+1. First, use list_files("wiki") to see what documentation is available
+2. Then, use read_file on relevant files to find the answer
+3. Once you find the answer, include the source file and section anchor
+4. Stop when you have the answer with a source reference
+
+Always include the source in your final answer (e.g., "wiki/git-workflow.md#resolving-merge-conflicts")"""
+        
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": question}
+        ]
+        
+        tools = self.get_tool_definitions()
+        tool_call_count = 0
+        max_tool_calls = 10
         
         try:
-            # Call the LLM
-            result = self.call_llm(question)
+            while tool_call_count < max_tool_calls:
+                print(f"\n--- Agent Loop Iteration {tool_call_count + 1} ---", file=sys.stderr)
+                
+                response = self.call_llm(messages, tools)
+                assistant_message = response['choices'][0]['message']
+                messages.append(assistant_message)
+                
+                if 'tool_calls' in assistant_message and assistant_message['tool_calls']:
+                    print(f"Tool calls requested: {len(assistant_message['tool_calls'])}", file=sys.stderr)
+                    
+                    for tool_call in assistant_message['tool_calls']:
+                        tool_name = tool_call['function']['name']
+                        arguments = json.loads(tool_call['function']['arguments'])
+                        
+                        tool_response = self.execute_tool(tool_call)
+                        messages.append(tool_response)
+                        
+                        tool_calls_history.append({
+                            "tool": tool_name,
+                            "args": arguments,
+                            "result": tool_response['content']
+                        })
+                        
+                        tool_call_count += 1
+                        
+                        if tool_call_count >= max_tool_calls:
+                            print(f"Reached maximum tool calls ({max_tool_calls})", file=sys.stderr)
+                            break
+                    
+                    continue
+                
+                else:
+                    final_answer = assistant_message.get('content', '')
+                    if not final_answer:
+                        final_answer = "I couldn't find an answer."
+                    
+                    print("Received final answer from LLM", file=sys.stderr)
+                    
+                    source = self.extract_source(messages)
+                    
+                    result = {
+                        "answer": final_answer.strip(),
+                        "source": source,
+                        "tool_calls": tool_calls_history
+                    }
+                    
+                    print(json.dumps(result, ensure_ascii=False))
+                    sys.exit(0)
             
-            # Output JSON to stdout
+            print(f"Maximum tool calls ({max_tool_calls}) reached without final answer", file=sys.stderr)
+            result = {
+                "answer": "I reached the maximum number of tool calls without finding a complete answer. Please try a more specific question.",
+                "source": "wiki/README.md",
+                "tool_calls": tool_calls_history
+            }
             print(json.dumps(result, ensure_ascii=False))
-            
-            # Exit with success code
             sys.exit(0)
             
         except Exception as e:
-            # All errors go to stderr
-            print(f"Error: {e}", file=sys.stderr)
-            
-            # Still output valid JSON structure with error message
+            print(f"Error in agent loop: {e}", file=sys.stderr)
             error_result = {
                 "answer": f"Error: {str(e)}",
-                "tool_calls": []
+                "source": "",
+                "tool_calls": tool_calls_history
             }
             print(json.dumps(error_result, ensure_ascii=False))
-            
-            # Exit with error code
             sys.exit(1)
         finally:
-            # Log execution time to stderr
             elapsed = (datetime.now() - start_time).total_seconds()
             print(f"Total execution time: {elapsed:.2f} seconds", file=sys.stderr)
 
 
 def main():
     """Main entry point."""
-    # Check command line arguments
     if len(sys.argv) != 2:
+        error_result = {
+            "answer": "Usage: uv run agent.py \"your question here\"",
+            "source": "",
+            "tool_calls": []
+        }
+        print(json.dumps(error_result, ensure_ascii=False))
         print("Usage: uv run agent.py \"your question here\"", file=sys.stderr)
         sys.exit(1)
     
     question = sys.argv[1]
     
-    # Create and run agent
+    signal.signal(signal.SIGALRM, lambda signum, frame: sys.exit(1))
+    signal.alarm(60)
+    
     try:
-        agent = Agent()
+        agent = DocumentationAgent()
         agent.run(question)
     except Exception as e:
         print(f"Failed to initialize agent: {e}", file=sys.stderr)
+        error_result = {
+            "answer": f"Failed to initialize agent: {str(e)}",
+            "source": "",
+            "tool_calls": []
+        }
+        print(json.dumps(error_result, ensure_ascii=False))
         sys.exit(1)
 
 
 if __name__ == "__main__":
-    # Ensure we exit within 60 seconds total
-    import signal
-    
-    def timeout_handler(signum, frame):
-        print("Error: Operation timed out after 60 seconds", file=sys.stderr)
-        sys.exit(1)
-    
-    signal.signal(signal.SIGALRM, timeout_handler)
-    signal.alarm(60)
-    
-    main()#!/usr/bin/env python3
-"""
-Agent CLI that calls an LLM and returns structured JSON.
-"""
-
-import json
-import os
-import sys
-from datetime import datetime
-from typing import Dict, Any
-
-import requests
-from dotenv import load_dotenv
-
-
-class Agent:
-    """Simple agent that calls an LLM API."""
-    
-    def __init__(self):
-        """Initialize agent with configuration from environment."""
-        # Load environment variables from .env.agent.secret
-        load_dotenv('.env.agent.secret')
-        
-        self.api_key = os.getenv('LLM_API_KEY')
-        self.api_base = os.getenv('LLM_API_BASE')
-        self.model = os.getenv('LLM_MODEL')
-        
-        if not all([self.api_key, self.api_base, self.model]):
-            raise ValueError(
-                "Missing required environment variables. "
-                "Please set LLM_API_KEY, LLM_API_BASE, and LLM_MODEL "
-                "in .env.agent.secret"
-            )
-        
-        # Debug info to stderr
-        print(f"Initializing agent with model: {self.model}", file=sys.stderr)
-        print(f"API base: {self.api_base}", file=sys.stderr)
-    
-    def call_llm(self, question: str) -> Dict[str, Any]:
-        """
-        Call the LLM API with the given question.
-        
-        Args:
-            question: The user's question
-            
-        Returns:
-            Dictionary with answer and tool_calls
-        """
-        # Prepare the API request
-        url = f"{self.api_base}/chat/completions"
-        
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
-        
-        # Minimal system prompt
-        data = {
-            "model": self.model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You are a helpful assistant that answers questions accurately and concisely."
-                },
-                {
-                    "role": "user",
-                    "content": question
-                }
-            ],
-            "temperature": 0.7,
-            "max_tokens": 1000
-        }
-        
-        print(f"Sending request to LLM...", file=sys.stderr)
-        
-        try:
-            # Make the API call with timeout
-            response = requests.post(
-                url,
-                headers=headers,
-                json=data,
-                timeout=30
-            )
-            
-            # Check for HTTP errors
-            response.raise_for_status()
-            
-            # Parse the response
-            result = response.json()
-            
-            # Extract the answer
-            answer = result['choices'][0]['message']['content']
-            
-            print(f"Received response from LLM", file=sys.stderr)
-            
-            # Return structured output
-            return {
-                "answer": answer.strip(),
-                "tool_calls": []
-            }
-            
-        except requests.exceptions.Timeout:
-            print("Error: API request timed out", file=sys.stderr)
-            raise
-        except requests.exceptions.RequestException as e:
-            print(f"Error calling LLM API: {e}", file=sys.stderr)
-            raise
-        except KeyError as e:
-            print(f"Error parsing API response: {e}", file=sys.stderr)
-            print(f"Response: {response.text}", file=sys.stderr)
-            raise
-        except json.JSONDecodeError as e:
-            print(f"Error decoding JSON response: {e}", file=sys.stderr)
-            print(f"Response: {response.text}", file=sys.stderr)
-            raise
-    
-    def run(self, question: str) -> None:
-        """
-        Run the agent with the given question.
-        
-        Args:
-            question: The user's question
-        """
-        start_time = datetime.now()
-        
-        try:
-            # Call the LLM
-            result = self.call_llm(question)
-            
-            # Output JSON to stdout
-            print(json.dumps(result, ensure_ascii=False))
-            
-            # Exit with success code
-            sys.exit(0)
-            
-        except Exception as e:
-            # All errors go to stderr
-            print(f"Error: {e}", file=sys.stderr)
-            
-            # Still output valid JSON structure with error message
-            error_result = {
-                "answer": f"Error: {str(e)}",
-                "tool_calls": []
-            }
-            print(json.dumps(error_result, ensure_ascii=False))
-            
-            # Exit with error code
-            sys.exit(1)
-        finally:
-            # Log execution time to stderr
-            elapsed = (datetime.now() - start_time).total_seconds()
-            print(f"Total execution time: {elapsed:.2f} seconds", file=sys.stderr)
-
-
-def main():
-    """Main entry point."""
-    # Check command line arguments
-    if len(sys.argv) != 2:
-        print("Usage: uv run agent.py \"your question here\"", file=sys.stderr)
-        sys.exit(1)
-    
-    question = sys.argv[1]
-    
-    # Create and run agent
-    try:
-        agent = Agent()
-        agent.run(question)
-    except Exception as e:
-        print(f"Failed to initialize agent: {e}", file=sys.stderr)
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    # Ensure we exit within 60 seconds total
-    import signal
-    
-    def timeout_handler(signum, frame):
-        print("Error: Operation timed out after 60 seconds", file=sys.stderr)
-        sys.exit(1)
-    
-    signal.signal(signal.SIGALRM, timeout_handler)
-    signal.alarm(60)
-    
     main()

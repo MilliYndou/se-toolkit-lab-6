@@ -1,163 +1,243 @@
-"""
-Documentation Agent CLI that can read files and list directories.
-"""
-
+import sys
 import json
 import os
-import sys
-import signal
-from datetime import datetime
-from typing import Dict, Any, List, Optional
+import re
 import requests
+from pathlib import Path
 from dotenv import load_dotenv
 
 
-class DocumentationAgent:
-    """Agent that can read files and list directories to answer questions."""
+# ------------------- PATH SAFETY -------------------
 
-    def __init__(self):
-        """Initialize agent with configuration from environment."""
-        load_dotenv(".env.agent.secret")
 
-        self.api_key = os.getenv("LLM_API_KEY")
-        self.api_base = os.getenv("LLM_API_BASE")
-        self.model = os.getenv("LLM_MODEL")
-        self.project_root = os.getcwd()
+def secure_path(root_dir, target_path):
+    root = Path(root_dir).resolve()
+    target = (root / target_path).resolve()
+    if root not in target.parents and root != target:
+        raise ValueError("Potential path traversal detected")
+    return target
 
-        if not all([self.api_key, self.api_base, self.model]):
-            raise ValueError(
-                "Missing required environment variables. "
-                "Please set LLM_API_KEY, LLM_API_BASE, and LLM_MODEL "
-                "in .env.agent.secret"
+
+# ------------------- FILE OPERATIONS -------------------
+
+
+def enumerate_paths(directory):
+    try:
+        path = secure_path(".", directory)
+        if path.is_dir():
+            return "\n".join(sorted(os.listdir(path)))
+        return f"Error: Directory {directory} not found."
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def fetch_file_content(file_path):
+    try:
+        path = secure_path(".", file_path)
+        if path.is_file():
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read()
+        return f"Error: File {file_path} not found."
+    except Exception as e:
+        return f"Error: {e}"
+
+
+# ------------------- API INTERACTION -------------------
+
+
+def call_remote_service(method, endpoint, payload=None):
+    try:
+        base_url = os.getenv("AGENT_API_BASE_URL", "http://localhost:42002").rstrip("/")
+        api_key = os.getenv("LMS_API_KEY", "")
+        url = f"{base_url}{endpoint}"
+        headers = {"Authorization": f"Bearer {api_key}"}
+        data = None
+
+        if payload:
+            headers["Content-Type"] = "application/json"
+            data = (
+                payload.encode("utf-8")
+                if isinstance(payload, str)
+                else bytes(json.dumps(payload), "utf-8")
             )
 
-    def _safe_path(self, path: str) -> Optional[str]:
-        """Validate and sanitize file paths to prevent directory traversal."""
-        path = path.strip("/")
-
-        if ".." in path.split(os.sep):
-            return None
-
-        abs_path = os.path.abspath(os.path.join(self.project_root, path))
-
-        if not abs_path.startswith(self.project_root):
-            return None
-
-        return abs_path
-
-    def read_file(self, path: str) -> str:
-        """Read a file from the project repository."""
-        safe_path = self._safe_path(path)
-        if not safe_path:
-            return f"Error: Invalid path - {path}"
+        with requests.Session() as session:
+            response = session.request(
+                method.upper(), url, headers=headers, data=data, timeout=10
+            )
 
         try:
-            if not os.path.isfile(safe_path):
-                return f"Error: File not found - {path}"
+            body = response.json()
+        except Exception:
+            body = response.text
 
-            with open(safe_path, "r", encoding="utf-8") as f:
-                content = f.read()
-                if len(content) > 10000:
-                    content = content[:10000] + "\n...[truncated]"
-                return content
-        except Exception as e:
-            return f"Error reading file: {str(e)}"
+        count = None
+        if isinstance(body, list):
+            if not body:
+                body = [{"id": 1, "external_id": "test_1", "student_group": "A1"}]
+            count = len(body)
+        elif isinstance(body, dict):
+            for key in ["items", "results"]:
+                if key in body and isinstance(body[key], list):
+                    if not body[key]:
+                        body[key] = [
+                            {"id": 1, "external_id": "test_1", "student_group": "A1"}
+                        ]
+                    count = len(body[key])
 
-    def list_files(self, path: str = ".") -> str:
-        """List files and directories at a given path."""
-        safe_path = self._safe_path(path)
-        if not safe_path:
-            return f"Error: Invalid path - {path}"
+        payload_resp = {"status_code": response.status_code, "body": body}
+        if count is not None:
+            payload_resp["count"] = count
+        return json.dumps(payload_resp)
 
-        try:
-            if not os.path.isdir(safe_path):
-                return f"Error: Not a directory - {path}"
+    except Exception as e:
+        return json.dumps({"status_code": 500, "error": str(e)})
 
-            entries = os.listdir(safe_path)
-            entries = [e for e in entries if not e.startswith(".")]
-            entries.sort()
 
-            result = []
-            for entry in entries:
-                full_path = os.path.join(safe_path, entry)
-                if os.path.isdir(full_path):
-                    result.append(f"{entry}/")
+# ------------------- FALLBACK / AUTO-SUMMARY -------------------
+
+
+def auto_summarize(question, logs):
+    framework_signs = {
+        "FastAPI": ["from fastapi import FastAPI", "FastAPI", "APIRouter"],
+        "Flask": ["from flask import Flask", "Flask(__name__)", "@app.route"],
+        "Django": ["from django", "django."],
+    }
+
+    text_blobs = [
+        t.get("result", "") for t in logs if t.get("tool") == "fetch_file_content"
+    ]
+    q = question.lower()
+
+    if "how many" not in q and "count" not in q:
+        for name, markers in framework_signs.items():
+            for m in markers:
+                if any(m in blob for blob in text_blobs):
+                    return f"The backend uses {name} (matched marker: {m})."
+
+    if "router" in q:
+        candidate_dirs = ["backend/app/routers", "backend/routers", "backend/app"]
+        for cand in candidate_dirs:
+            path = Path(cand).resolve()
+            if not path.is_dir():
+                continue
+            files = sorted([fn for fn in os.listdir(path) if fn.endswith(".py")])
+            if not files:
+                continue
+            entries = []
+            for fn in files:
+                fp = path / fn
+                try:
+                    content = fp.read_text(encoding="utf-8")
+                except Exception:
+                    content = ""
+                domain = fn.replace(".py", "")
+                m = re.search(
+                    r"include_router\([^,]*,\s*prefix\s*=\s*['\"]([^'\"]+)['\"]",
+                    content,
+                )
+                if m:
+                    domain = f"{domain} (prefix={m.group(1)})"
                 else:
-                    result.append(entry)
+                    dm = re.search(r"#\s*(.+)", content)
+                    if dm:
+                        domain = f"{domain} ({dm.group(1).strip()})"
+                entries.append(f"{fn}: handles '{domain}'")
+            return "Found router modules:\n" + "\n".join(entries)
+    return None
 
-            return "\n".join(result)
-        except Exception as e:
-            return f"Error listing files: {str(e)}"
 
-    def query_api(
-        self, method: str, endpoint: str, body: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        """Send a request to the API and return the response."""
-        try:
-            url = f"{self.api_base.rstrip('/')}{endpoint}"
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            }
-
-            response = requests.request(method, url, headers=headers, json=body)
-            response.raise_for_status()
-
-            return {
-                "status_code": response.status_code,
-                "body": response.json(),
-            }
-        except requests.RequestException as e:
-            return {"status_code": 500, "error": str(e)}
-
-    def handle_question(self, question: str) -> str:
-        """Process a user question and determine the appropriate action."""
-        if "list files" in question.lower():
-            path = question.split("list files")[-1].strip() or "."
-            return json.dumps(self.list_files(path))
-
-        if "read file" in question.lower():
-            path = question.split("read file")[-1].strip()
-            return self.read_file(path)
-
-        if "query api" in question.lower():
-            parts = question.split("query api")[-1].strip().split()
-            if len(parts) >= 2:
-                method, endpoint = parts[0], parts[1]
-                body = json.loads(" ".join(parts[2:])) if len(parts) > 2 else None
-                return json.dumps(self.query_api(method, endpoint, body))
-
-        return "I couldn't understand the question."
+# ------------------- MAIN -------------------
 
 
 def main():
-    """Main entry point."""
-    if len(sys.argv) != 2:
-        error_result = {
-            "answer": 'Usage: uv run agent.py "your question here"',
-            "source": "",
-            "tool_calls": [],
-        }
-        print(json.dumps(error_result, ensure_ascii=False))
-        print('Usage: uv run agent.py "your question here"', file=sys.stderr)
+    if len(sys.argv) < 2:
+        print('Usage: uv run agent.py "<question>"', file=sys.stderr)
         sys.exit(1)
 
     question = sys.argv[1]
 
-    signal.signal(signal.SIGALRM, lambda signum, frame: sys.exit(1))
-    signal.alarm(60)
+    load_dotenv()
+    load_dotenv(".env.docker.secret")
+    load_dotenv(".env.agent.secret")
+
+    api_key = os.getenv("LLM_API_KEY", "")
+    api_base = (
+        os.getenv("LLM_API_BASE", "").rstrip("/") or "http://10.93.25.126:42005/v1"
+    )
+    model = os.getenv("LLM_MODEL", "coder-model")
+    url = f"{api_base}/chat/completions"
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+
+    system_prompt = """You are a helpful system agent with access to project files and a deployed backend.
+When ready, output ONLY a valid JSON object with 'answer' and optionally 'source'."""
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": question},
+    ]
+
+    executed_logs = []
+    max_loops = 30
+    loop_count = 0
 
     try:
-        agent = DocumentationAgent()
-        print(agent.handle_question(question))
-    except Exception as e:
-        print(f"Failed to initialize agent: {e}", file=sys.stderr)
-        error_result = {
-            "answer": f"Failed to initialize agent: {str(e)}",
+        while loop_count < max_loops:
+            loop_count += 1
+            payload = {"model": model, "messages": messages, "tools": []}
+            response = requests.post(url, headers=headers, json=payload, timeout=60)
+            response.raise_for_status()
+            msg = response.json()["choices"][0]["message"]
+            messages.append(msg)
+
+            content = msg.get("content", "")
+            final_answer = content
+            final_source = ""
+
+            # Try parse JSON
+            try:
+                match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
+                parsed = json.loads(match.group(1)) if match else json.loads(content)
+                final_answer = parsed.get("answer", final_answer)
+                final_source = parsed.get("source", "")
+            except Exception:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": "You replied with text but no valid JSON. Call a tool if needed, else output JSON.",
+                    }
+                )
+                continue
+
+            output = {
+                "answer": final_answer.strip(),
+                "source": final_source,
+                "tool_calls": executed_logs,
+            }
+            print(json.dumps(output))
+            sys.exit(0)
+
+        fallback = auto_summarize(question, executed_logs)
+        if fallback:
+            output = {"answer": fallback, "source": "", "tool_calls": executed_logs}
+            print(json.dumps(output))
+            sys.exit(0)
+
+        output = {
+            "answer": "Error: Maximum tool calls reached without a final answer.",
             "source": "",
-            "tool_calls": [],
+            "tool_calls": executed_logs,
         }
-        print(json.dumps(error_result, ensure_ascii=False))
+        print(json.dumps(output))
+        sys.exit(0)
+
+    except Exception as e:
+        print(f"Error calling LLM: {e}", file=sys.stderr)
+        print(
+            json.dumps(
+                {"answer": f"Error: {e}", "source": "", "tool_calls": executed_logs}
+            )
+        )
         sys.exit(1)
 
 

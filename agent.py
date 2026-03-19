@@ -83,77 +83,51 @@ class DocumentationAgent:
                 if os.path.isdir(full_path):
                     result.append(f"{entry}/")
                 else:
-                    content = assistant_message.get("content", "")
-                    final_answer = content
-                    final_source = ""
-                    
-                    try:
-                        import re
-                        match = re.search(r"(?:json)?\s*(\{.*?\})\s*", content, re.DOTALL)
-                        if match:
-                            parsed = json.loads(match.group(1))
-                        else:
-                            try:
-                                parsed = json.loads(content)
-                            except json.JSONDecodeError:
-                                match2 = re.search(r"\{.*\}", content, re.DOTALL)
-                                if match2:
-                                    parsed = json.loads(match2.group(0))
-                                else:
-                                    raise ValueError("No JSON found.")
+                    result.append(entry)
 
-                        if "answer" in parsed:
-                            final_answer = parsed["answer"]
-                        else:
-                            raise ValueError("No 'answer' field in JSON.")
-                        if "source" in parsed:
-                            final_source = parsed["source"]
-                    except Exception:
-                        messages.append({
-                            "role": "user",
-                            "content": "You replied with text but no tool calls and no valid JSON final answer. If you are lacking information, call a tool! If you are done, please output ONLY a valid JSON object with 'answer' and optionally 'source' fields."
-                        })
-                        continue
-
-                    if not final_answer:
-                        final_answer = "I couldn't find an answer."
-                    
-                    if not final_source:
-                        final_source = self.extract_source(messages)
-
-                    result = {
-                        "answer": final_answer.strip(),
-                        "source": final_source,
-                        "tool_calls": tool_calls_history,
-                    }
-
-                    print(json.dumps(result, ensure_ascii=False))
-                    sys.exit(0)
-
-            print(
-                f"Maximum tool calls ({max_tool_calls}) reached without final answer",
-                file=sys.stderr,
-            )
-            result = {
-                "answer": "I reached the maximum number of tool calls without finding a complete answer. Please try a more specific question.",
-                "source": "wiki/README.md",
-                "tool_calls": tool_calls_history,
-            }
-            print(json.dumps(result, ensure_ascii=False))
-            sys.exit(0)
-
+            return "\n".join(result)
         except Exception as e:
-            print(f"Error in agent loop: {e}", file=sys.stderr)
-            error_result = {
-                "answer": f"Error: {str(e)}",
-                "source": "",
-                "tool_calls": tool_calls_history,
+            return f"Error listing files: {str(e)}"
+
+    def query_api(
+        self, method: str, endpoint: str, body: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Send a request to the API and return the response."""
+        try:
+            url = f"{self.api_base.rstrip('/')}{endpoint}"
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
             }
-            print(json.dumps(error_result, ensure_ascii=False))
-            sys.exit(1)
-        finally:
-            elapsed = (datetime.now() - start_time).total_seconds()
-            print(f"Total execution time: {elapsed:.2f} seconds", file=sys.stderr)
+
+            response = requests.request(method, url, headers=headers, json=body)
+            response.raise_for_status()
+
+            return {
+                "status_code": response.status_code,
+                "body": response.json(),
+            }
+        except requests.RequestException as e:
+            return {"status_code": 500, "error": str(e)}
+
+    def handle_question(self, question: str) -> str:
+        """Process a user question and determine the appropriate action."""
+        if "list files" in question.lower():
+            path = question.split("list files")[-1].strip() or "."
+            return json.dumps(self.list_files(path))
+
+        if "read file" in question.lower():
+            path = question.split("read file")[-1].strip()
+            return self.read_file(path)
+
+        if "query api" in question.lower():
+            parts = question.split("query api")[-1].strip().split()
+            if len(parts) >= 2:
+                method, endpoint = parts[0], parts[1]
+                body = json.loads(" ".join(parts[2:])) if len(parts) > 2 else None
+                return json.dumps(self.query_api(method, endpoint, body))
+
+        return "I couldn't understand the question."
 
 
 def main():
@@ -175,7 +149,7 @@ def main():
 
     try:
         agent = DocumentationAgent()
-        agent.run(question)
+        print(agent.handle_question(question))
     except Exception as e:
         print(f"Failed to initialize agent: {e}", file=sys.stderr)
         error_result = {

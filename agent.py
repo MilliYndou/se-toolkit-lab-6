@@ -31,31 +31,23 @@ class DocumentationAgent:
                 "Please set LLM_API_KEY, LLM_API_BASE, and LLM_MODEL "
                 "in .env.agent.secret"
             )
-        
-        print(f"Initializing Documentation Agent with model: {self.model}", file=sys.stderr)
-        print(f"Project root: {self.project_root}", file=sys.stderr)
-        print(f"API base: {self.api_base}", file=sys.stderr)
-    
+
     def _safe_path(self, path: str) -> Optional[str]:
         """Validate and sanitize file paths to prevent directory traversal."""
         path = path.strip('/')
-        
+
         if '..' in path.split(os.sep):
-            print(f"Security: Rejected path with '..' - {path}", file=sys.stderr)
             return None
-        
+
         abs_path = os.path.abspath(os.path.join(self.project_root, path))
-        
+
         if not abs_path.startswith(self.project_root):
-            print(f"Security: Path outside project root - {abs_path}", file=sys.stderr)
             return None
-        
+
         return abs_path
-    
+
     def read_file(self, path: str) -> str:
         """Read a file from the project repository."""
-        print(f"Tool: read_file({path})", file=sys.stderr)
-        
         safe_path = self._safe_path(path)
         if not safe_path:
             return f"Error: Invalid path - {path}"
@@ -74,8 +66,6 @@ class DocumentationAgent:
     
     def list_files(self, path: str = ".") -> str:
         """List files and directories at a given path."""
-        print(f"Tool: list_files({path})", file=sys.stderr)
-        
         safe_path = self._safe_path(path)
         if not safe_path:
             return f"Error: Invalid path - {path}"
@@ -235,15 +225,10 @@ Always include the source in your final answer (e.g., "backend/app/routers/items
         
         try:
             while tool_call_count < max_tool_calls:
-                print(f"\n--- Agent Loop Iteration {tool_call_count + 1} ---", file=sys.stderr)
-                
                 response = self.call_llm(messages, tools)
                 assistant_message = response['choices'][0]['message']
                 messages.append(assistant_message)
-                
                 if 'tool_calls' in assistant_message and assistant_message['tool_calls']:
-                    print(f"Tool calls requested: {len(assistant_message['tool_calls'])}", file=sys.stderr)
-                    
                     for tool_call in assistant_message['tool_calls']:
                         tool_name = tool_call['function']['name']
                         arguments = json.loads(tool_call['function']['arguments'])
@@ -258,20 +243,17 @@ Always include the source in your final answer (e.g., "backend/app/routers/items
                         })
                         
                         tool_call_count += 1
-                        
+
                         if tool_call_count >= max_tool_calls:
-                            print(f"Reached maximum tool calls ({max_tool_calls})", file=sys.stderr)
                             break
-                    
+
                     continue
-                
+
                 else:
                     final_answer = assistant_message.get('content', '')
                     if not final_answer:
                         final_answer = "I couldn't find an answer."
-                    
-                    print("Received final answer from LLM", file=sys.stderr)
-                    
+
                     source = self.extract_source(messages)
                     
                     result = {
@@ -282,8 +264,7 @@ Always include the source in your final answer (e.g., "backend/app/routers/items
                     
                     print(json.dumps(result, ensure_ascii=False))
                     sys.exit(0)
-            
-            print(f"Maximum tool calls ({max_tool_calls}) reached without final answer", file=sys.stderr)
+
             result = {
                 "answer": "I reached the maximum number of tool calls without finding a complete answer. Please try a more specific question.",
                 "source": "wiki/README.md",
@@ -291,9 +272,8 @@ Always include the source in your final answer (e.g., "backend/app/routers/items
             }
             print(json.dumps(result, ensure_ascii=False))
             sys.exit(0)
-            
+
         except Exception as e:
-            print(f"Error in agent loop: {e}", file=sys.stderr)
             error_result = {
                 "answer": f"Error: {str(e)}",
                 "source": "",
@@ -301,9 +281,6 @@ Always include the source in your final answer (e.g., "backend/app/routers/items
             }
             print(json.dumps(error_result, ensure_ascii=False))
             sys.exit(1)
-        finally:
-            elapsed = (datetime.now() - start_time).total_seconds()
-            print(f"Total execution time: {elapsed:.2f} seconds", file=sys.stderr)
 
 
 def main():
@@ -315,19 +292,17 @@ def main():
             "tool_calls": []
         }
         print(json.dumps(error_result, ensure_ascii=False))
-        print("Usage: uv run agent.py \"your question here\"", file=sys.stderr)
         sys.exit(1)
-    
+
     question = sys.argv[1]
-    
+
     signal.signal(signal.SIGALRM, lambda signum, frame: sys.exit(1))
     signal.alarm(60)
-    
+
     try:
         agent = DocumentationAgent()
         agent.run(question)
     except Exception as e:
-        print(f"Failed to initialize agent: {e}", file=sys.stderr)
         error_result = {
             "answer": f"Failed to initialize agent: {str(e)}",
             "source": "",

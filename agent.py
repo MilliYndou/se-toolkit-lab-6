@@ -37,7 +37,7 @@ def get_directory_contents(path):
         return f"Error: {e}"
 
 
-def fetch_data_from_api(method, path, body=None):
+def query_api(method, path, body=None):
     try:
         base_url = os.getenv("AGENT_API_BASE_URL").rstrip("/")
         lms_api_key = os.getenv("LMS_API_KEY", "")

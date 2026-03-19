@@ -157,8 +157,6 @@ def main():
 
     question = sys.argv[1]
 
-    load_dotenv()
-    load_dotenv(".env.docker.secret")
     load_dotenv(".env.agent.secret")
 
     api_key = os.getenv("LLM_API_KEY", "")

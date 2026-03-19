@@ -257,7 +257,7 @@ If you don't know the answer, set "source" to "". Output nothing but this JSON o
         return None
 
     def _count_items_or_learners(path):
-        res = fetch_data_from_api("GET", path)
+        res = query_api("GET", path)
         parsed = _load_json_safely(res)
         tool_call = {
             "tool": "query_api",
@@ -483,7 +483,7 @@ If you don't know the answer, set "source" to "". Output nothing but this JSON o
                     elif tool_name == "read_file":
                         result_str = load_file_content(args.get("path", ""))
                     elif tool_name == "query_api":
-                        result_str = fetch_data_from_api(
+                        result_str = query_api(
                             args.get("method", "GET"),
                             args.get("path", "/"),
                             args.get("body", None),

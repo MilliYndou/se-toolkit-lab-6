@@ -202,21 +202,27 @@ class DocumentationAgent:
         """Run the agent with the given question."""
         start_time = datetime.now()
         tool_calls_history = []
-        
-        system_prompt = """You are a documentation assistant for a software project. 
-Your task is to answer questions by reading the project's wiki files.
+
+        system_prompt = """You are a documentation assistant for a software project.
+Your task is to answer questions by reading the project's files.
 
 You have access to two tools:
 1. list_files(path) - Discover what files exist in a directory
 2. read_file(path) - Read the contents of a file
 
 Follow these steps:
-1. First, use list_files("wiki") to see what documentation is available
-2. Then, use read_file on relevant files to find the answer
-3. Once you find the answer, include the source file and section anchor
-4. Stop when you have the answer with a source reference
+1. Analyze the question to determine which directory to explore (wiki/, backend/, frontend/, etc.)
+2. Use list_files() to discover what files are available in relevant directories
+3. Use read_file() on relevant files to find the answer
+4. Once you find the answer, provide a complete response with all requested details
+5. Include the source file path in your final answer
 
-Always include the source in your final answer (e.g., "wiki/git-workflow.md#resolving-merge-conflicts")"""
+For questions about code structure (routers, modules, etc.):
+- Explore the backend/app/routers/ directory for API endpoints
+- Read each router file to understand its domain/purpose
+- List all routers and describe what each one handles
+
+Always include the source in your final answer (e.g., "backend/app/routers/items.py")"""
         
         messages = [
             {"role": "system", "content": system_prompt},

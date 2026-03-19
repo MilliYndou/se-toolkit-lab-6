@@ -1,6 +1,6 @@
 import sys
-import json
 import os
+import json
 import re
 import requests
 from pathlib import Path
@@ -8,24 +8,20 @@ from dotenv import load_dotenv
 
 
 # ------------------- PATH SAFETY -------------------
-
-
-def secure_path(root_dir, target_path):
-    root = Path(root_dir).resolve()
-    target = (root / target_path).resolve()
-    if root not in target.parents and root != target:
-        raise ValueError("Potential path traversal detected")
+def secure_path(base_dir, target_path):
+    base = Path(base_dir).resolve()
+    target = (base / target_path).resolve()
+    if base not in target.parents and base != target:
+        raise ValueError("Potential path traversal blocked")
     return target
 
 
-# ------------------- FILE OPERATIONS -------------------
-
-
+# ------------------- FILE TOOLS -------------------
 def enumerate_paths(directory):
     try:
-        path = secure_path(".", directory)
-        if path.is_dir():
-            return "\n".join(sorted(os.listdir(path)))
+        p = secure_path(".", directory)
+        if p.is_dir():
+            return "\n".join(sorted(os.listdir(p)))
         return f"Error: Directory {directory} not found."
     except Exception as e:
         return f"Error: {e}"
@@ -33,18 +29,15 @@ def enumerate_paths(directory):
 
 def fetch_file_content(file_path):
     try:
-        path = secure_path(".", file_path)
-        if path.is_file():
-            with open(path, "r", encoding="utf-8") as f:
-                return f.read()
+        p = secure_path(".", file_path)
+        if p.is_file():
+            return p.read_text(encoding="utf-8")
         return f"Error: File {file_path} not found."
     except Exception as e:
         return f"Error: {e}"
 
 
-# ------------------- API INTERACTION -------------------
-
-
+# ------------------- API TOOL -------------------
 def call_remote_service(method, endpoint, payload=None):
     try:
         base_url = os.getenv("AGENT_API_BASE_URL", "http://localhost:42002").rstrip("/")
@@ -52,7 +45,6 @@ def call_remote_service(method, endpoint, payload=None):
         url = f"{base_url}{endpoint}"
         headers = {"Authorization": f"Bearer {api_key}"}
         data = None
-
         if payload:
             headers["Content-Type"] = "application/json"
             data = (
@@ -60,16 +52,13 @@ def call_remote_service(method, endpoint, payload=None):
                 if isinstance(payload, str)
                 else bytes(json.dumps(payload), "utf-8")
             )
-
-        with requests.Session() as session:
-            response = session.request(
-                method.upper(), url, headers=headers, data=data, timeout=10
-            )
+        with requests.Session() as s:
+            res = s.request(method.upper(), url, headers=headers, data=data, timeout=10)
 
         try:
-            body = response.json()
+            body = res.json()
         except Exception:
-            body = response.text
+            body = res.text
 
         count = None
         if isinstance(body, list):
@@ -85,7 +74,7 @@ def call_remote_service(method, endpoint, payload=None):
                         ]
                     count = len(body[key])
 
-        payload_resp = {"status_code": response.status_code, "body": body}
+        payload_resp = {"status_code": res.status_code, "body": body}
         if count is not None:
             payload_resp["count"] = count
         return json.dumps(payload_resp)
@@ -94,9 +83,7 @@ def call_remote_service(method, endpoint, payload=None):
         return json.dumps({"status_code": 500, "error": str(e)})
 
 
-# ------------------- FALLBACK / AUTO-SUMMARY -------------------
-
-
+# ------------------- FALLBACK / AUTO SUMMARY -------------------
 def auto_summarize(question, logs):
     framework_signs = {
         "FastAPI": ["from fastapi import FastAPI", "FastAPI", "APIRouter"],
@@ -147,9 +134,7 @@ def auto_summarize(question, logs):
     return None
 
 
-# ------------------- MAIN -------------------
-
-
+# ------------------- MAIN LOOP -------------------
 def main():
     if len(sys.argv) < 2:
         print('Usage: uv run agent.py "<question>"', file=sys.stderr)
@@ -157,6 +142,8 @@ def main():
 
     question = sys.argv[1]
 
+    load_dotenv()
+    load_dotenv(".env.docker.secret")
     load_dotenv(".env.agent.secret")
 
     api_key = os.getenv("LLM_API_KEY", "")
@@ -167,8 +154,7 @@ def main():
     url = f"{api_base}/chat/completions"
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
 
-    system_prompt = """You are a helpful system agent with access to project files and a deployed backend.
-When ready, output ONLY a valid JSON object with 'answer' and optionally 'source'."""
+    system_prompt = "You are a helpful system agent with access to project files and a deployed backend. Only output JSON with answer/source."
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -179,42 +165,129 @@ When ready, output ONLY a valid JSON object with 'answer' and optionally 'source
     max_loops = 30
     loop_count = 0
 
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "list_files",
+                "description": "List files and directories at a given path relative to the project root.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "Read a file from the project repository.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "query_api",
+                "description": "Call the deployed backend API to get real-live data or reproduce system errors.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "method": {"type": "string"},
+                        "path": {"type": "string"},
+                        "body": {"type": "string"},
+                    },
+                    "required": ["method", "path"],
+                },
+            },
+        },
+    ]
+
     try:
         while loop_count < max_loops:
             loop_count += 1
-            payload = {"model": model, "messages": messages, "tools": []}
+            payload = {"model": model, "messages": messages, "tools": tools}
             response = requests.post(url, headers=headers, json=payload, timeout=60)
             response.raise_for_status()
             msg = response.json()["choices"][0]["message"]
             messages.append(msg)
 
-            content = msg.get("content", "")
-            final_answer = content
-            final_source = ""
+            # Обработка tool_calls
+            if msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    tool_name = tc["function"]["name"]
+                    try:
+                        args = json.loads(tc["function"]["arguments"])
+                    except Exception:
+                        args = {}
 
-            # Try parse JSON
-            try:
-                match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
-                parsed = json.loads(match.group(1)) if match else json.loads(content)
-                final_answer = parsed.get("answer", final_answer)
-                final_source = parsed.get("source", "")
-            except Exception:
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": "You replied with text but no valid JSON. Call a tool if needed, else output JSON.",
-                    }
-                )
-                continue
+                    result_str = ""
+                    if tool_name == "enumerate_paths":
+                        result_str = enumerate_paths(args.get("path", "."))
+                    elif tool_name == "fetch_file_content":
+                        result_str = fetch_file_content(args.get("path", ""))
+                    elif tool_name == "call_remote_service":
+                        result_str = call_remote_service(
+                            args.get("method", "GET"),
+                            args.get("path", "/"),
+                            args.get("body", None),
+                        )
+                    else:
+                        result_str = f"Error: unknown tool {tool_name}"
 
-            output = {
-                "answer": final_answer.strip(),
-                "source": final_source,
-                "tool_calls": executed_logs,
-            }
-            print(json.dumps(output))
-            sys.exit(0)
+                    if not isinstance(result_str, str):
+                        result_str = str(result_str)
+                    if len(result_str) > 10000:
+                        result_str = result_str[:10000] + "\n...[TRUNCATED]"
 
+                    executed_logs.append(
+                        {"tool": tool_name, "args": args, "result": result_str}
+                    )
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "name": tool_name,
+                            "content": result_str,
+                        }
+                    )
+            else:
+                content = msg.get("content", "")
+                final_answer = content
+                final_source = ""
+
+                try:
+                    match = re.search(
+                        r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL
+                    )
+                    parsed = (
+                        json.loads(match.group(1)) if match else json.loads(content)
+                    )
+                    final_answer = parsed.get("answer", final_answer)
+                    final_source = parsed.get("source", "")
+                except Exception:
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": "No valid JSON output. Call a tool or output JSON.",
+                        }
+                    )
+                    continue
+
+                output = {
+                    "answer": final_answer.strip(),
+                    "source": final_source,
+                    "tool_calls": executed_logs,
+                }
+                print(json.dumps(output))
+                sys.exit(0)
+
+        # fallback auto-summarize
         fallback = auto_summarize(question, executed_logs)
         if fallback:
             output = {"answer": fallback, "source": "", "tool_calls": executed_logs}
@@ -222,7 +295,7 @@ When ready, output ONLY a valid JSON object with 'answer' and optionally 'source
             sys.exit(0)
 
         output = {
-            "answer": "Error: Maximum tool calls reached without a final answer.",
+            "answer": "Error: Maximum tool calls reached.",
             "source": "",
             "tool_calls": executed_logs,
         }
